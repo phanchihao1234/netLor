@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ChevronLeft,
@@ -107,7 +107,14 @@ function App() {
 
   return (
     <div className="app">
-      <Header route={route} setRoute={setRoute} query={query} setQuery={setQuery} onSubmit={submitSearch} />
+      <Header
+        route={route}
+        setRoute={setRoute}
+        query={query}
+        setQuery={setQuery}
+        onSubmit={submitSearch}
+        openMovie={openMovie}
+      />
       {route.screen === 'home' ? (
         <Home openMovie={openMovie} />
       ) : (
@@ -118,8 +125,11 @@ function App() {
   );
 }
 
-function Header({ route, setRoute, query, setQuery, onSubmit }) {
+function Header({ route, setRoute, query, setQuery, onSubmit, openMovie }) {
   const [solid, setSolid] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [suggestLoading, setSuggestLoading] = useState(false);
 
   useEffect(() => {
     const onScroll = () => setSolid(window.scrollY > 24);
@@ -127,6 +137,49 @@ function Header({ route, setRoute, query, setQuery, onSubmit }) {
     window.addEventListener('scroll', onScroll);
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
+
+  useEffect(() => {
+    const keyword = query.trim();
+    if (keyword.length < 2) {
+      setSuggestions([]);
+      setSuggestLoading(false);
+      return undefined;
+    }
+
+    let mounted = true;
+    setSuggestLoading(true);
+    const timer = window.setTimeout(() => {
+      fetchJson(`/films/search?keyword=${encodeURIComponent(keyword)}`)
+        .then((payload) => {
+          if (mounted) {
+            setSuggestions(normalizeList(payload).slice(0, 6));
+          }
+        })
+        .catch(() => {
+          if (mounted) {
+            setSuggestions([]);
+          }
+        })
+        .finally(() => {
+          if (mounted) {
+            setSuggestLoading(false);
+          }
+        });
+    }, 350);
+
+    return () => {
+      mounted = false;
+      window.clearTimeout(timer);
+    };
+  }, [query]);
+
+  const showSuggestions = query.trim().length >= 2;
+
+  const selectSuggestion = (movie) => {
+    setFocused(false);
+    setQuery('');
+    openMovie(slugOf(movie));
+  };
 
   return (
     <header className={`topbar ${solid || route.screen !== 'home' ? 'topbarSolid' : ''}`}>
@@ -157,6 +210,21 @@ function Header({ route, setRoute, query, setQuery, onSubmit }) {
           aria-label="Tìm phim"
         />
       </form>
+      {showSuggestions ? (
+        <div className="searchSuggest">
+          {suggestLoading ? <div className="suggestState">Đang tìm...</div> : null}
+          {!suggestLoading && suggestions.length === 0 ? <div className="suggestState">Không có gợi ý phù hợp</div> : null}
+          {suggestions.map((movie) => (
+            <button key={`suggest-${slugOf(movie)}`} className="suggestItem" onMouseDown={() => selectSuggestion(movie)}>
+              <img src={imageOf(movie)} alt={nameOf(movie)} />
+              <span>
+                <strong>{nameOf(movie)}</strong>
+                <small>{movie?.origin_name || movie?.episode_current || movie?.year || 'Đang cập nhật'}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </header>
   );
 }
@@ -164,12 +232,41 @@ function Header({ route, setRoute, query, setQuery, onSubmit }) {
 function Home({ openMovie }) {
   const { data, loading } = useApi('/films/phim-moi-cap-nhat?page=1', {});
   const latest = normalizeList(data);
-  const hero = latest[0];
+  const [heroIndex, setHeroIndex] = useState(0);
+  const hero = latest[heroIndex] || latest[0];
+  const heroSlides = latest.slice(0, 8);
+
+  useEffect(() => {
+    if (heroIndex >= heroSlides.length) {
+      setHeroIndex(0);
+    }
+  }, [heroIndex, heroSlides.length]);
+
+  const moveHero = (direction) => {
+    if (!heroSlides.length) return;
+    setHeroIndex((current) => {
+      const nextIndex = current + direction;
+      return Math.min(Math.max(nextIndex, 0), heroSlides.length - 1);
+    });
+  };
 
   return (
     <main>
-      <section className="hero" style={{ backgroundImage: `linear-gradient(90deg, #050505 0%, rgba(5,5,5,.78) 38%, rgba(5,5,5,.12) 100%), url(${imageOf(hero)})` }}>
-        <div className="heroContent">
+      <section className="hero">
+        <div className="heroSlider" style={{ transform: `translate3d(${-heroIndex * 100}%, 0, 0)` }}>
+          {(heroSlides.length ? heroSlides : [hero]).map((movie, index) => (
+            <div
+              className="heroSlide"
+              style={{ backgroundImage: `linear-gradient(90deg, #050505 0%, rgba(5,5,5,.78) 38%, rgba(5,5,5,.12) 100%), url(${imageOf(movie)})` }}
+              aria-hidden={index !== heroIndex}
+              key={`hero-${slugOf(movie)}-${index}`}
+            />
+          ))}
+        </div>
+        <button className="heroNav heroPrev" onClick={() => moveHero(-1)} disabled={heroSlides.length < 2} aria-label="Phim nổi bật trước">
+          <ChevronLeft size={42} />
+        </button>
+        <div className="heroContent" key={slugOf(hero) || heroIndex}>
           <div className="kicker">
             <Star size={16} fill="currentColor" />
             Phim mới cập nhật
@@ -187,6 +284,9 @@ function Home({ openMovie }) {
             </button>
           </div>
         </div>
+        <button className="heroNav heroNext" onClick={() => moveHero(1)} disabled={heroSlides.length < 2} aria-label="Phim nổi bật tiếp theo">
+          <ChevronRight size={42} />
+        </button>
       </section>
       <section className="rows">
         {loading ? <LoadingBlock /> : null}
@@ -201,6 +301,39 @@ function Home({ openMovie }) {
 function MovieRow({ title, endpoint, openMovie }) {
   const { data, loading, error } = useApi(endpoint, {});
   const movies = normalizeList(data).slice(0, 18);
+  const railRef = useRef(null);
+  const [canGoPrev, setCanGoPrev] = useState(false);
+  const [canGoNext, setCanGoNext] = useState(false);
+
+  const updateRailState = () => {
+    const rail = railRef.current;
+    if (!rail) return;
+    const maxScroll = rail.scrollWidth - rail.clientWidth;
+    setCanGoPrev(rail.scrollLeft > 4);
+    setCanGoNext(rail.scrollLeft < maxScroll - 4);
+  };
+
+  useEffect(() => {
+    updateRailState();
+    const rail = railRef.current;
+    if (!rail) return undefined;
+
+    rail.addEventListener('scroll', updateRailState, { passive: true });
+    window.addEventListener('resize', updateRailState);
+    return () => {
+      rail.removeEventListener('scroll', updateRailState);
+      window.removeEventListener('resize', updateRailState);
+    };
+  }, [movies.length]);
+
+  const moveRail = (direction) => {
+    const rail = railRef.current;
+    if (!rail) return;
+    rail.scrollBy({
+      left: direction * Math.max(rail.clientWidth * 0.86, 320),
+      behavior: 'smooth',
+    });
+  };
 
   return (
     <section className="movieRow">
@@ -209,10 +342,28 @@ function MovieRow({ title, endpoint, openMovie }) {
       </div>
       {loading ? <LoadingBlock compact /> : null}
       {error ? <p className="error">{error}</p> : null}
-      <div className="rail">
-        {movies.map((movie) => (
-          <MovieCard key={`${title}-${slugOf(movie)}`} movie={movie} openMovie={openMovie} />
-        ))}
+      <div className="railShell">
+        <button
+          className="railNav railPrev"
+          onClick={() => moveRail(-1)}
+          disabled={!canGoPrev}
+          aria-label={`Xem phim trước trong ${title}`}
+        >
+          <ChevronLeft size={34} />
+        </button>
+        <div className="rail" ref={railRef}>
+          {movies.map((movie) => (
+            <MovieCard key={`${title}-${slugOf(movie)}`} movie={movie} openMovie={openMovie} />
+          ))}
+        </div>
+        <button
+          className="railNav railNext"
+          onClick={() => moveRail(1)}
+          disabled={!canGoNext}
+          aria-label={`Xem phim tiếp theo trong ${title}`}
+        >
+          <ChevronRight size={34} />
+        </button>
       </div>
     </section>
   );
@@ -292,6 +443,13 @@ function MovieModal({ slug, onClose }) {
   useEffect(() => {
     setEpisode(null);
   }, [slug]);
+
+  useEffect(() => {
+    document.body.classList.add('modalOpen');
+    return () => {
+      document.body.classList.remove('modalOpen');
+    };
+  }, []);
 
   return (
     <div className="modalLayer" role="dialog" aria-modal="true">
